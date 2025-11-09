@@ -1,4 +1,3 @@
-# scrape.py
 import feedparser
 import xml.etree.ElementTree as ET
 import os
@@ -6,7 +5,7 @@ from datetime import datetime
 import calendar
 import email.utils
 
-SRC = "https://politepol.com/fd/wpC8lyjp7CVq.xml"
+SRC = "https://www.kalbela.com/rss/popular-rss.xml"
 FILES = {
     "opinion": "opinion.xml",
     "world": "world.xml"
@@ -53,13 +52,6 @@ def get_item_pubdt(item):
             return datetime.min
 
 def merge_update_feed(root, entries):
-    """
-    Update existing XML (opinion/world). Behavior:
-      - If incoming link not present => insert new item at top.
-      - If incoming link present and incoming pubDate > existing pubDate => update title/pubDate/guid and move to top.
-      - Otherwise skip.
-      - Keep max 500 items.
-    """
     channel = root.find("channel")
     existing_map = {}
     for item in channel.findall("item"):
@@ -109,23 +101,22 @@ def merge_update_feed(root, entries):
         for extra in all_items[500:]:
             channel.remove(extra)
 
-# Main
 feed = feedparser.parse(SRC)
 
 # opinion
 op_root = load_existing(FILES["opinion"])
 op_entries = [
     e for e in feed.entries
-    if any(x in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip()) for x in ["/opinion/", "/editorial/", "/sub-editorial/"])
+    if "/opinion/" in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip())
 ]
 merge_update_feed(op_root, op_entries)
 ET.ElementTree(op_root).write(FILES["opinion"], encoding="utf-8", xml_declaration=True)
 
-# world (changed to /international/)
+# world
 wr_root = load_existing(FILES["world"])
 wr_entries = [
     e for e in feed.entries
-    if "/international/" in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip())
+    if "/world/" in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip())
 ]
 merge_update_feed(wr_root, wr_entries)
 ET.ElementTree(wr_root).write(FILES["world"], encoding="utf-8", xml_declaration=True)
