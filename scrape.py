@@ -8,7 +8,8 @@ import email.utils
 SRC = "https://www.kalbela.com/rss/popular-rss.xml"
 FILES = {
     "opinion": "opinion.xml",
-    "world": "world.xml"
+    "world": "world.xml",
+    "daily": "daily.xml"
 }
 
 def load_existing(path):
@@ -107,7 +108,8 @@ feed = feedparser.parse(SRC)
 op_root = load_existing(FILES["opinion"])
 op_entries = [
     e for e in feed.entries
-    if "/opinion/" in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip())
+    if any(x in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip())
+           for x in ["/opinion/", "/joto-mot-toto-path/"])
 ]
 merge_update_feed(op_root, op_entries)
 ET.ElementTree(op_root).write(FILES["opinion"], encoding="utf-8", xml_declaration=True)
@@ -120,3 +122,12 @@ wr_entries = [
 ]
 merge_update_feed(wr_root, wr_entries)
 ET.ElementTree(wr_root).write(FILES["world"], encoding="utf-8", xml_declaration=True)
+
+# daily
+dl_root = load_existing(FILES["daily"])
+dl_entries = [
+    e for e in feed.entries
+    if "/ajkerpatrika/" in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip())
+]
+merge_update_feed(dl_root, dl_entries)
+ET.ElementTree(dl_root).write(FILES["daily"], encoding="utf-8", xml_declaration=True)
