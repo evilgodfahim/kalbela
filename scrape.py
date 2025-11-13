@@ -5,7 +5,12 @@ from datetime import datetime
 import calendar
 import email.utils
 
-SRC = "https://www.kalbela.com/rss/popular-rss.xml"
+# Original and new source
+SOURCES = [
+    "https://www.kalbela.com/rss/popular-rss.xml",
+    "https://evilgodfahim.github.io/kal/articles.xml"
+]
+
 FILES = {
     "opinion": "opinion.xml",
     "world": "world.xml",
@@ -102,12 +107,16 @@ def merge_update_feed(root, entries):
         for extra in all_items[500:]:
             channel.remove(extra)
 
-feed = feedparser.parse(SRC)
+# Load and merge entries from all sources
+all_entries = []
+for src in SOURCES:
+    feed = feedparser.parse(src)
+    all_entries.extend(feed.entries)
 
 # opinion
 op_root = load_existing(FILES["opinion"])
 op_entries = [
-    e for e in feed.entries
+    e for e in all_entries
     if any(x in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip())
            for x in ["/opinion/", "/joto-mot-toto-path/"])
 ]
@@ -117,7 +126,7 @@ ET.ElementTree(op_root).write(FILES["opinion"], encoding="utf-8", xml_declaratio
 # world
 wr_root = load_existing(FILES["world"])
 wr_entries = [
-    e for e in feed.entries
+    e for e in all_entries
     if "/world/" in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip())
 ]
 merge_update_feed(wr_root, wr_entries)
@@ -126,7 +135,7 @@ ET.ElementTree(wr_root).write(FILES["world"], encoding="utf-8", xml_declaration=
 # daily
 dl_root = load_existing(FILES["daily"])
 dl_entries = [
-    e for e in feed.entries
+    e for e in all_entries
     if "/ajkerpatrika/" in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip())
 ]
 merge_update_feed(dl_root, dl_entries)
