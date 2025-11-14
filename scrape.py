@@ -8,7 +8,9 @@ import email.utils
 # Original and new source
 SOURCES = [
     "https://www.kalbela.com/rss/popular-rss.xml",
-    "https://evilgodfahim.github.io/kal/articles.xml"
+    "https://evilgodfahim.github.io/kal/articles.xml",
+
+"https://www.prothomalo.com/feed/"
 ]
 
 FILES = {
