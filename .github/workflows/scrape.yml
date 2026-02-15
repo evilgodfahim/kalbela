@@ -8,6 +8,11 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    env:
+      FLARE_URL: ${{ secrets.FLARE_URL }}
+      FLARE_API_KEY: ${{ secrets.FLARE_API_KEY }}
+      FLARE_SESSION: ${{ secrets.FLARE_SESSION }}
+      FLARE_MAX_TIMEOUT: "60000"
     steps:
       - uses: actions/checkout@v3
 
@@ -17,7 +22,7 @@ jobs:
           python-version: '3.x'
 
       - name: Install dependencies
-        run: pip install feedparser
+        run: pip install feedparser requests
 
       - name: Run scraper
         run: python scrape.py
@@ -26,6 +31,7 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add opinion.xml world.xml daily.xml
+          git add opinion.xml world.xml daily.xml print_articles_tracker.json
           git commit -m "update feeds" || echo "no changes"
           git push
+```0
