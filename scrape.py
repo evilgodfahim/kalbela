@@ -1,16 +1,19 @@
-import feedparser
-import xml.etree.ElementTree as ET
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
-from datetime import datetime
 import calendar
 import email.utils
+from datetime import datetime, timezone
+import requests
+import feedparser
+import xml.etree.ElementTree as ET
 
-# Original and new source
+# Sources and output files
 SOURCES = [
     "https://www.kalbela.com/rss/popular-rss.xml",
     "https://evilgodfahim.github.io/kal/articles.xml",
-
-"https://www.prothomalo.com/feed/"
+    "https://www.prothomalo.com/feed/"
 ]
 
 FILES = {
@@ -19,18 +22,42 @@ FILES = {
     "daily": "daily.xml"
 }
 
+# FlareSolverr config (set in environment or CI secrets)
+FLARE_URL = os.environ.get("FLARE_URL")        # e.g. http://127.0.0.1:8191/v1
+FLARE_API_KEY = os.environ.get("FLARE_API_KEY")
+FLARE_SESSION = os.environ.get("FLARE_SESSION")
+FLARE_MAX_TIMEOUT = int(os.environ.get("FLARE_MAX_TIMEOUT", "60000"))
+
+# Utilities
 def load_existing(path):
     if not os.path.exists(path):
         root = ET.Element("rss", version="2.0")
         ET.SubElement(root, "channel")
         return root
-    return ET.parse(path).getroot()
+    try:
+        return ET.parse(path).getroot()
+    except Exception:
+        root = ET.Element("rss", version="2.0")
+        ET.SubElement(root, "channel")
+        return root
 
 def format_pubdate(dt):
-    return dt.strftime("%a, %d %b %Y %H:%M:%S GMT")
+    # dt must be timezone-aware UTC
+    if dt is None:
+        dt = datetime(1970,1,1, tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
 
 def parse_struct_time(st):
-    return datetime.utcfromtimestamp(calendar.timegm(st))
+    # st is time.struct_time from feedparser; return timezone-aware UTC datetime
+    ts = calendar.timegm(st)
+    return datetime.fromtimestamp(ts, timezone.utc)
+
+def ensure_utc(dt):
+    if dt is None:
+        return datetime(1970,1,1, tzinfo=timezone.utc)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 def get_entry_pubdt(entry):
     pp = getattr(entry, "published_parsed", None)
@@ -42,103 +69,158 @@ def get_entry_pubdt(entry):
     ps = getattr(entry, "published", None)
     if ps:
         try:
-            return email.utils.parsedate_to_datetime(ps).replace(tzinfo=None)
+            dt = email.utils.parsedate_to_datetime(ps)
+            return ensure_utc(dt)
         except Exception:
             pass
-    return datetime.utcnow()
+    return datetime.now(timezone.utc)
 
 def get_item_pubdt(item):
     txt = item.findtext("pubDate")
     if not txt:
-        return datetime.min
+        return datetime.min.replace(tzinfo=timezone.utc)
     try:
-        return email.utils.parsedate_to_datetime(txt).replace(tzinfo=None)
+        dt = email.utils.parsedate_to_datetime(txt)
+        return ensure_utc(dt)
     except Exception:
         try:
-            return datetime.strptime(txt, "%a, %d %b %Y %H:%M:%S GMT")
+            dt = datetime.strptime(txt, "%a, %d %b %Y %H:%M:%S GMT")
+            return dt.replace(tzinfo=timezone.utc)
         except Exception:
-            return datetime.min
+            return datetime.min.replace(tzinfo=timezone.utc)
 
+# FlareSolverr helpers
+def fetch_via_flaresolverr(url, timeout_ms=FLARE_MAX_TIMEOUT):
+    if not FLARE_URL:
+        raise RuntimeError("FLARE_URL not configured")
+    payload = {
+        "cmd": "request.get",
+        "url": url,
+        "maxTimeout": int(timeout_ms),
+        "userAgent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    }
+    if FLARE_SESSION:
+        payload["session"] = FLARE_SESSION
+    headers = {"Content-Type": "application/json"}
+    if FLARE_API_KEY:
+        headers["X-Api-Key"] = FLARE_API_KEY
+    resp = requests.post(FLARE_URL, json=payload, headers=headers, timeout=(10, int(timeout_ms/1000) + 10))
+    resp.raise_for_status()
+    data = resp.json()
+    sol = data.get("solution") or {}
+    html = sol.get("response") or sol.get("html") or data.get("response") or data.get("html")
+    if not html:
+        raise RuntimeError(f"FlareSolverr returned no HTML for {url}: {data}")
+    return html
+
+def fetch_feed_text(url):
+    # prefer FlareSolverr when configured, else direct requests
+    if FLARE_URL:
+        try:
+            return fetch_via_flaresolverr(url)
+        except Exception:
+            # fallback to direct request if FlareSolverr call fails
+            pass
+    r = requests.get(url, timeout=(5,30))
+    r.raise_for_status()
+    return r.text
+
+# Merge logic
 def merge_update_feed(root, entries):
     channel = root.find("channel")
-    existing_map = {}
+    if channel is None:
+        channel = ET.SubElement(root, "channel")
+    existing = {}
     for item in channel.findall("item"):
-        link_text = item.findtext("link")
-        if link_text:
-            existing_map[link_text] = item
-
+        link = item.findtext("link")
+        if link:
+            existing[link] = item
     for entry in entries:
         link = getattr(entry, "link", None) or getattr(entry, "id", None)
         if not link:
             continue
         link = link.strip()
         incoming_dt = get_entry_pubdt(entry)
-
-        if link in existing_map:
-            item = existing_map[link]
-            existing_dt = get_item_pubdt(item)
-            if incoming_dt > existing_dt:
-                t = item.find("title")
-                if t is None:
-                    t = ET.SubElement(item, "title")
-                t.text = getattr(entry, "title", t.text)
-
-                pd = item.find("pubDate")
-                if pd is None:
-                    pd = ET.SubElement(item, "pubDate")
-                pd.text = getattr(entry, "published", format_pubdate(incoming_dt))
-
-                g = item.find("guid")
-                if g is None:
-                    g = ET.SubElement(item, "guid", isPermaLink="false")
-                g.text = link
-
+        if link in existing:
+            item = existing[link]
+            if incoming_dt > get_item_pubdt(item):
+                title_el = item.find("title")
+                if title_el is None:
+                    ET.SubElement(item, "title").text = getattr(entry, "title", "")
+                else:
+                    title_el.text = getattr(entry, "title", title_el.text)
+                pd_el = item.find("pubDate")
+                if pd_el is None:
+                    ET.SubElement(item, "pubDate").text = format_pubdate(incoming_dt)
+                else:
+                    pd_el.text = getattr(entry, "published", format_pubdate(incoming_dt))
+                guid_el = item.find("guid")
+                if guid_el is None:
+                    ET.SubElement(item, "guid", isPermaLink="false").text = link
+                else:
+                    guid_el.text = link
                 channel.remove(item)
                 channel.insert(0, item)
         else:
             item = ET.Element("item")
             ET.SubElement(item, "title").text = getattr(entry, "title", "")
             ET.SubElement(item, "link").text = link
-            ET.SubElement(item, "pubDate").text = getattr(entry, "published", format_pubdate(incoming_dt))
+            ET.SubElement(item, "pubDate").text = format_pubdate(get_entry_pubdt(entry))
             ET.SubElement(item, "guid", isPermaLink="false").text = link
             channel.insert(0, item)
-            existing_map[link] = item
-
+            existing[link] = item
     all_items = channel.findall("item")
-    if len(all_items) > 500:
-        for extra in all_items[500:]:
-            channel.remove(extra)
+    for extra in all_items[500:]:
+        channel.remove(extra)
 
-# Load and merge entries from all sources
-all_entries = []
-for src in SOURCES:
-    feed = feedparser.parse(src)
-    all_entries.extend(feed.entries)
+# Main flow
+def collect_all_entries():
+    all_entries = []
+    for src in SOURCES:
+        try:
+            feed_text = None
+            if FLARE_URL:
+                # try fetch via FlareSolverr; fallback inside fetch_feed_text
+                feed_text = fetch_feed_text(src)
+            if feed_text:
+                feed = feedparser.parse(feed_text)
+            else:
+                feed = feedparser.parse(src)
+            all_entries.extend(feed.entries)
+        except Exception:
+            continue
+    return all_entries
 
-# opinion
-op_root = load_existing(FILES["opinion"])
-op_entries = [
-    e for e in all_entries
-    if any(x in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip())
-           for x in ["/opinion/", "/joto-mot-toto-path/"])
-]
-merge_update_feed(op_root, op_entries)
-ET.ElementTree(op_root).write(FILES["opinion"], encoding="utf-8", xml_declaration=True)
+def main():
+    all_entries = collect_all_entries()
+    # opinion
+    op_root = load_existing(FILES["opinion"])
+    op_entries = [
+        e for e in all_entries
+        if any(x in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip())
+               for x in ["/opinion/", "/joto-mot-toto-path/"])
+    ]
+    merge_update_feed(op_root, op_entries)
+    ET.ElementTree(op_root).write(FILES["opinion"], encoding="utf-8", xml_declaration=True)
 
-# world
-wr_root = load_existing(FILES["world"])
-wr_entries = [
-    e for e in all_entries
-    if "/world/" in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip())
-]
-merge_update_feed(wr_root, wr_entries)
-ET.ElementTree(wr_root).write(FILES["world"], encoding="utf-8", xml_declaration=True)
+    # world
+    wr_root = load_existing(FILES["world"])
+    wr_entries = [
+        e for e in all_entries
+        if "/world/" in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip())
+    ]
+    merge_update_feed(wr_root, wr_entries)
+    ET.ElementTree(wr_root).write(FILES["world"], encoding="utf-8", xml_declaration=True)
 
-# daily
-dl_root = load_existing(FILES["daily"])
-dl_entries = [
-    e for e in all_entries
-    if "/ajkerpatrika/" in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip())
-]
-merge_update_feed(dl_root, dl_entries)
-ET.ElementTree(dl_root).write(FILES["daily"], encoding="utf-8", xml_declaration=True)
+    # daily
+    dl_root = load_existing(FILES["daily"])
+    dl_entries = [
+        e for e in all_entries
+        if "/ajkerpatrika/" in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip())
+    ]
+    merge_update_feed(dl_root, dl_entries)
+    ET.ElementTree(dl_root).write(FILES["daily"], encoding="utf-8", xml_declaration=True)
+
+if __name__ == "__main__":
+    main()
