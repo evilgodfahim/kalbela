@@ -22,7 +22,7 @@ jobs:
           python-version: '3.x'
 
       - name: Install dependencies
-        run: pip install feedparser requests
+        run: pip install --upgrade pip && pip install feedparser requests
 
       - name: Run scraper
         run: python scrape.py
@@ -31,6 +31,6 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add opinion.xml world.xml daily.xml print_articles_tracker.json
+          git add -A
           git commit -m "update feeds" || echo "no changes"
           git push
