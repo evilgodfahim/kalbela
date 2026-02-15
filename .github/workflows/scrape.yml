@@ -34,4 +34,3 @@ jobs:
           git add opinion.xml world.xml daily.xml print_articles_tracker.json
           git commit -m "update feeds" || echo "no changes"
           git push
-```0
