@@ -9,6 +9,9 @@ from datetime import datetime, timezone, timedelta
 import requests
 import feedparser
 import xml.etree.ElementTree as ET
+import subprocess, sys
+subprocess.check_call([sys.executable, "-m", "pip", "install", "beautifulsoup4", "-q"])
+
 from bs4 import BeautifulSoup
 
 # ── Sources ────────────────────────────────────────────────────────────────
