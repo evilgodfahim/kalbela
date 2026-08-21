@@ -4,16 +4,24 @@
 import os
 import calendar
 import email.utils
-from datetime import datetime, timezone
+import types
+from datetime import datetime, timezone, timedelta
 import requests
 import feedparser
 import xml.etree.ElementTree as ET
+from bs4 import BeautifulSoup
 
-# Sources and output files
+# ── Sources ────────────────────────────────────────────────────────────────
+
 SOURCES = [
     "https://www.kalbela.com/rss/popular-rss.xml",
     "https://evilgodfahim.github.io/kal/articles.xml",
     "https://www.prothomalo.com/feed/"
+]
+
+# HTML pages scraped directly (not RSS)
+HTML_SOURCES = [
+    "https://www.kalbela.com/opinion",
 ]
 
 FILES = {
@@ -22,13 +30,30 @@ FILES = {
     "daily": "daily.xml"
 }
 
-# FlareSolverr config (set in environment or CI secrets)
-FLARE_URL = os.environ.get("FLARE_URL")        # e.g. http://127.0.0.1:8191/v1
+# ── FlareSolverr config ────────────────────────────────────────────────────
+
+FLARE_URL = os.environ.get("FLARE_URL")
 FLARE_API_KEY = os.environ.get("FLARE_API_KEY")
 FLARE_SESSION = os.environ.get("FLARE_SESSION")
 FLARE_MAX_TIMEOUT = int(os.environ.get("FLARE_MAX_TIMEOUT", "60000"))
 
-# Utilities
+_BD_TZ = timezone(timedelta(hours=6))  # Bangladesh Standard Time (UTC+6)
+
+# ── HTML scraping: sections to strip before collecting links ───────────────
+#
+# These containers hold "popular" or "latest" news widgets that appear on the
+# opinion category page but are NOT part of the main article listing.
+#
+_EXCLUDED_SELECTORS = [
+    "#static_opinion",        # Featured/popular opinion carousel (flexslider)
+    "#topnewsFlex",           # Top-news slider
+    ".flex_latest",           # Latest-news ticker strip
+    "section#breaking-news",  # Breaking-news banner
+    "section#just-news",      # "Just in" news banner
+]
+
+# ── Utilities ──────────────────────────────────────────────────────────────
+
 def load_existing(path):
     if not os.path.exists(path):
         root = ET.Element("rss", version="2.0")
@@ -41,23 +66,25 @@ def load_existing(path):
         ET.SubElement(root, "channel")
         return root
 
+
 def format_pubdate(dt):
-    # dt must be timezone-aware UTC
     if dt is None:
-        dt = datetime(1970,1,1, tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+        dt = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return email.utils.format_datetime(dt.astimezone(_BD_TZ))
+
 
 def parse_struct_time(st):
-    # st is time.struct_time from feedparser; return timezone-aware UTC datetime
     ts = calendar.timegm(st)
     return datetime.fromtimestamp(ts, timezone.utc)
 
+
 def ensure_utc(dt):
     if dt is None:
-        return datetime(1970,1,1, tzinfo=timezone.utc)
+        return datetime(1970, 1, 1, tzinfo=timezone.utc)
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
 
 def get_entry_pubdt(entry):
     pp = getattr(entry, "published_parsed", None)
@@ -75,6 +102,7 @@ def get_entry_pubdt(entry):
             pass
     return datetime.now(timezone.utc)
 
+
 def get_item_pubdt(item):
     txt = item.findtext("pubDate")
     if not txt:
@@ -89,7 +117,9 @@ def get_item_pubdt(item):
         except Exception:
             return datetime.min.replace(tzinfo=timezone.utc)
 
-# FlareSolverr helpers
+
+# ── FlareSolverr helpers ───────────────────────────────────────────────────
+
 def fetch_via_flaresolverr(url, timeout_ms=FLARE_MAX_TIMEOUT):
     if not FLARE_URL:
         raise RuntimeError("FLARE_URL not configured")
@@ -97,36 +127,123 @@ def fetch_via_flaresolverr(url, timeout_ms=FLARE_MAX_TIMEOUT):
         "cmd": "request.get",
         "url": url,
         "maxTimeout": int(timeout_ms),
-        "userAgent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        "userAgent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
     }
     if FLARE_SESSION:
         payload["session"] = FLARE_SESSION
     headers = {"Content-Type": "application/json"}
     if FLARE_API_KEY:
         headers["X-Api-Key"] = FLARE_API_KEY
-    resp = requests.post(FLARE_URL, json=payload, headers=headers, timeout=(10, int(timeout_ms/1000) + 10))
+    resp = requests.post(
+        FLARE_URL, json=payload, headers=headers,
+        timeout=(10, int(timeout_ms / 1000) + 10),
+    )
     resp.raise_for_status()
     data = resp.json()
     sol = data.get("solution") or {}
-    html = sol.get("response") or sol.get("html") or data.get("response") or data.get("html")
+    html = (
+        sol.get("response")
+        or sol.get("html")
+        or data.get("response")
+        or data.get("html")
+    )
     if not html:
         raise RuntimeError(f"FlareSolverr returned no HTML for {url}: {data}")
     return html
 
+
 def fetch_feed_text(url):
-    # prefer FlareSolverr when configured, else direct requests
     if FLARE_URL:
         try:
             return fetch_via_flaresolverr(url)
         except Exception:
-            # fallback to direct request if FlareSolverr call fails
             pass
-    r = requests.get(url, timeout=(5,30))
+    r = requests.get(url, timeout=(5, 30))
     r.raise_for_status()
     return r.text
 
-# Merge logic
+
+# ── HTML scraping ──────────────────────────────────────────────────────────
+
+def scrape_html_opinion(url):
+    """
+    Fetch an opinion category HTML page and return article entries.
+
+    Strips popular/latest-news containers (_EXCLUDED_SELECTORS) before
+    collecting links so only the main article listing is harvested.
+
+    Returns a list of SimpleNamespace objects with the same attributes that
+    get_entry_pubdt() and merge_update_feed() expect from feedparser entries:
+      .link, .id, .title, .published_parsed, .published
+    """
+    try:
+        html = fetch_feed_text(url)
+    except Exception:
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Strip popular / latest sections before touching any links
+    for sel in _EXCLUDED_SELECTORS:
+        for el in soup.select(sel):
+            el.decompose()
+
+    # Prefer the main category listing div; fall back to <body>
+    cat_page = soup.select_one("div.catagory-page") or soup.body
+    if cat_page is None:
+        return []
+
+    entries = []
+    seen = set()
+
+    # Article structure on kalbela.com category pages:
+    #
+    #   <div class="news-content-box">
+    #     <a aria-label="TITLE" href="/opinion/SUBCATEGORY/ID">
+    #       <h5 class="titleShow ...">TITLE</h5>
+    #     </a>
+    #     <!-- trailing duplicate link with class="link" and no content -->
+    #     <a aria-label="TITLE" class="link" href="..."></a>
+    #   </div>
+    #
+    # Selecting h5.titleShow and walking up to the parent <a> gives us
+    # only the real title links (not the empty trailing ones).
+
+    for h5 in cat_page.select("div.news-content-box h5.titleShow"):
+        anchor = h5.find_parent("a")
+        if anchor is None:
+            continue
+
+        href = anchor.get("href", "").strip()
+        if not href:
+            continue
+        if href.startswith("/"):
+            href = "https://www.kalbela.com" + href
+
+        if href in seen:
+            continue
+        seen.add(href)
+
+        title = (anchor.get("aria-label") or "").strip() or h5.get_text(strip=True)
+
+        # No pubDate is available on the listing page; get_entry_pubdt()
+        # will fall through to datetime.now(timezone.utc).
+        entries.append(types.SimpleNamespace(
+            link=href,
+            id=href,
+            title=title,
+            published_parsed=None,
+            published=None,
+        ))
+
+    return entries
+
+
+# ── Merge logic ────────────────────────────────────────────────────────────
+
 def merge_update_feed(root, entries):
     channel = root.find("channel")
     if channel is None:
@@ -174,14 +291,17 @@ def merge_update_feed(root, entries):
     for extra in all_items[500:]:
         channel.remove(extra)
 
-# Main flow
+
+# ── Main flow ──────────────────────────────────────────────────────────────
+
 def collect_all_entries():
     all_entries = []
+
+    # RSS / Atom sources
     for src in SOURCES:
         try:
             feed_text = None
             if FLARE_URL:
-                # try fetch via FlareSolverr; fallback inside fetch_feed_text
                 feed_text = fetch_feed_text(src)
             if feed_text:
                 feed = feedparser.parse(feed_text)
@@ -190,16 +310,25 @@ def collect_all_entries():
             all_entries.extend(feed.entries)
         except Exception:
             continue
+
+    # HTML sources scraped directly
+    for src in HTML_SOURCES:
+        all_entries.extend(scrape_html_opinion(src))
+
     return all_entries
+
 
 def main():
     all_entries = collect_all_entries()
+
     # opinion
     op_root = load_existing(FILES["opinion"])
     op_entries = [
         e for e in all_entries
-        if any(x in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip())
-               for x in ["/opinion/", "/joto-mot-toto-path/"])
+        if any(
+            x in ((getattr(e, "link", None) or getattr(e, "id", None) or "").strip())
+            for x in ["/opinion/", "/joto-mot-toto-path/"]
+        )
     ]
     merge_update_feed(op_root, op_entries)
     ET.ElementTree(op_root).write(FILES["opinion"], encoding="utf-8", xml_declaration=True)
@@ -221,6 +350,7 @@ def main():
     ]
     merge_update_feed(dl_root, dl_entries)
     ET.ElementTree(dl_root).write(FILES["daily"], encoding="utf-8", xml_declaration=True)
+
 
 if __name__ == "__main__":
     main()
