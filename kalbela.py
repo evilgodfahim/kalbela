@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scrape_kalbela.py
+kalbela.py
 -----------------
 Scrapes kalbela.com/opinion for all opinion articles and generates
 an Inoreader-compatible RSS 2.0 feed with RFC 2822 pub dates.
@@ -20,6 +20,7 @@ State
 """
 
 import json
+import os
 import re
 import sys
 from datetime import datetime, timedelta, timezone
@@ -31,22 +32,12 @@ from bs4 import BeautifulSoup
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
-BASE_URL       = "https://www.kalbela.com"
-OPINION_URL    = f"{BASE_URL}/opinion"
-OUTPUT_XML     = "kalbela_opinion.xml"
-STATE_FILE     = "feed_state.json"
-RETENTION_DAYS = 30
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/125.0 Safari/537.36"
-    ),
-    "Accept-Language": "bn-BD,bn;q=0.9,en;q=0.8",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Cache-Control": "no-cache",
-}
+BASE_URL         = "https://www.kalbela.com"
+OPINION_URL      = f"{BASE_URL}/opinion"
+OUTPUT_XML       = "opinion.xml"
+STATE_FILE       = "feed_state.json"
+RETENTION_DAYS   = 30
+FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "http://localhost:8191/v1")
 
 # ── Date helpers ──────────────────────────────────────────────────────────────
 
@@ -246,16 +237,26 @@ def _build_rss(articles: list[dict]) -> str:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _fetch_html(url: str) -> str:
+    """Fetch page HTML via FlareSolverr (bypasses bot-detection / 403)."""
+    payload = {"cmd": "request.get", "url": url, "maxTimeout": 60000}
+    resp = requests.post(FLARESOLVERR_URL, json=payload, timeout=120)
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("status") != "ok":
+        raise RuntimeError(f"FlareSolverr error: {data.get('message', data)}")
+    return data["solution"]["response"]
+
+
 def main() -> None:
-    print(f"Fetching {OPINION_URL} …")
+    print(f"Fetching {OPINION_URL} via FlareSolverr …")
     try:
-        resp = requests.get(OPINION_URL, headers=HEADERS, timeout=30)
-        resp.raise_for_status()
+        html = _fetch_html(OPINION_URL)
     except Exception as exc:
         print(f"[ERROR] fetch failed: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    fresh = scrape(resp.text)
+    fresh = scrape(html)
     print(f"Scraped {len(fresh)} articles from live page.")
 
     # Merge with persisted history; fresh data wins on conflicts
