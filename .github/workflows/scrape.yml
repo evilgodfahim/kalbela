@@ -1,36 +1,42 @@
-name: scrape
+name: Kalbela Opinion RSS
 
 on:
   schedule:
-    - cron: "0 * * * *"
-  workflow_dispatch:
+    - cron: "0 * * * *"   # every hour on the hour (UTC)
+  workflow_dispatch:       # allow manual trigger from Actions tab
+
+permissions:
+  contents: write          # needed to commit + push generated files
 
 jobs:
-  run:
+  scrape:
     runs-on: ubuntu-latest
-    env:
-      FLARE_URL: ${{ secrets.FLARE_URL }}
-      FLARE_API_KEY: ${{ secrets.FLARE_API_KEY }}
-      FLARE_SESSION: ${{ secrets.FLARE_SESSION }}
-      FLARE_MAX_TIMEOUT: "60000"
-    steps:
-      - uses: actions/checkout@v3
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: "3.12"
+          cache: pip
 
       - name: Install dependencies
-        run: pip install --upgrade pip && pip install feedparser requests
+        run: pip install requests beautifulsoup4
 
       - name: Run scraper
-        run: python scrape.py
+        run: python kalbela.py
 
-      - name: Commit and push
+      - name: Commit and push changes
         run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add -A
-          git commit -m "update feeds" || echo "no changes"
-          git push
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add opinion.xml feed_state.json
+          # Only commit when something actually changed
+          if git diff --cached --quiet; then
+            echo "No changes 鈥� skipping commit."
+          else
+            git commit -m "feed: kalbela opinion [$(date -u +%Y-%m-%dT%H:%M:%SZ)]"
+            git push
+          fi
