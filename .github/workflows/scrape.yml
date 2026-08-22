@@ -3,14 +3,29 @@ name: Kalbela Opinion RSS
 on:
   schedule:
     - cron: "0 * * * *"   # every hour on the hour (UTC)
-  workflow_dispatch:       # allow manual trigger from Actions tab
+  workflow_dispatch:
 
 permissions:
-  contents: write          # needed to commit + push generated files
+  contents: write
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+
+    services:
+      flaresolverr:
+        image: ghcr.io/flaresolverr/flaresolverr:latest
+        ports:
+          - 8191:8191
+        env:
+          LOG_LEVEL: info
+          TZ: Asia/Dhaka
+        options: >-
+          --health-cmd "curl -sf http://localhost:8191/health"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 12
+          --health-start-period 40s
 
     steps:
       - name: Checkout repository
@@ -26,6 +41,8 @@ jobs:
         run: pip install requests beautifulsoup4
 
       - name: Run scraper
+        env:
+          FLARESOLVERR_URL: http://localhost:8191/v1
         run: python kalbela.py
 
       - name: Commit and push changes
@@ -33,7 +50,6 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add opinion.xml feed_state.json
-          # Only commit when something actually changed
           if git diff --cached --quiet; then
             echo "No changes 鈥� skipping commit."
           else
