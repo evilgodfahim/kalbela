@@ -35,7 +35,7 @@ STATE_FILE       = "feed_state.json"
 RETENTION_DAYS   = 30
 FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "http://localhost:8191/v1")
 
-# ── Date helpers ──────────────────────────────────────────────────────────────
+# ── Date helpers (RFC 2822 formatting) ───────────────────────────────────────
 
 _RE_IMG_TS   = re.compile(r"/image[_-]\d+[_-](\d{9,11})\.")
 _RE_IMG_PATH = re.compile(r"/news_photos/(\d{4})/(\d{2})/(\d{2})/")
@@ -43,6 +43,11 @@ _LAZY_MARKER = "lazy-logo.png"
 
 
 def _pub_date_from_image(img_src: str) -> str:
+    """
+    Extracts a timestamp from the image URL and returns a strict 
+    RFC 2822 formatted date string (e.g., 'Wed, 02 Oct 2002 15:00:00 GMT') 
+    required for RSS 2.0 <pubDate>.
+    """
     m = _RE_IMG_TS.search(img_src)
     if m:
         return formatdate(int(m.group(1)), usegmt=True)
@@ -76,46 +81,43 @@ def scrape(html: str) -> list[dict]:
     articles: list[dict] = []
     seen: set[str] = set()
 
-    # ── Debug counts ───────────────────────────────────────────────────────
-    all_a   = soup.find_all("a", href=True)
-    all_h5  = soup.find_all("h5", class_="titleShow")
-    all_img = soup.find_all("img", class_="news_img")
-    print(f"[DEBUG] a[href]={len(all_a)}  h5.titleShow={len(all_h5)}  img.news_img={len(all_img)}")
+    # Target the main opinion containers to avoid latest/popular sidebar widgets
+    cards = soup.select("div.catagory-page .news-content-box")
+    print(f"[DEBUG] Found {len(cards)} article cards via .news-content-box")
 
-    opinion_hrefs = [_abs(a["href"]) for a in all_a if "opinion" in a.get("href", "")]
-    print(f"[DEBUG] hrefs containing 'opinion' ({len(opinion_hrefs)}): {opinion_hrefs[:6]}")
-    # ──────────────────────────────────────────────────────────────────────
-
-    for a_tag in soup.find_all("a", href=True):
+    for card in cards:
+        # 1. Link
+        a_tag = card.select_one('a[href^="https://www.kalbela.com/opinion/"]')
+        if not a_tag:
+            continue
+            
         href = _abs((a_tag.get("href") or "").strip())
 
+        # Ensure it's a specific article link, not a subcategory navigation link
         if not _OPINION_RE.match(href):
-            continue
-
-        # Accept this <a> only if the title heading lives somewhere inside it.
-        # Works regardless of how many levels deep h5 is nested.
-        h5 = a_tag.find("h5", class_="titleShow")
-        if not h5:
             continue
 
         if href in seen:
             continue
         seen.add(href)
 
-        # Walk up to card container (first ancestor holding an img.news_img)
-        card = a_tag
-        for _ in range(12):
-            card = card.parent
-            if card is None:
-                break
-            if card.find("img", class_="news_img"):
-                break
-
-        if card is None:
+        # 2. Title
+        title_tag = card.select_one("h5.titleShow")
+        if not title_tag:
+            # Fallback if they ever drop the .titleShow class
+            title_tag = card.find(["h2", "h3", "h4", "h5", "h6"])
+            
+        if not title_tag:
             continue
+            
+        title = _clean(title_tag.get_text(" ", strip=True))
 
-        # Image
-        img_tag = card.find("img", class_="news_img")
+        # 3. Summary/Description
+        summary_div = card.select_one(".news-brief")
+        summary = _clean(summary_div.get_text(" ", strip=True))[:800] if summary_div else ""
+
+        # 4. Image
+        img_tag = card.select_one("img")
         raw_src = img_url = ""
         if img_tag:
             raw_src = img_tag.get("src") or img_tag.get("data-original") or ""
@@ -124,16 +126,12 @@ def scrape(html: str) -> list[dict]:
             if raw_src:
                 img_url = raw_src if raw_src.startswith("http") else BASE_URL + raw_src
 
-        # Summary
-        summary_div = card.find("div", class_="summery")
-        summary = _clean(summary_div.get_text(" ", strip=True))[:800] if summary_div else ""
-
-        # Subcategory from URL path
+        # 5. Subcategory (extracted from the URL path)
         subcategory = href.rstrip("/").split("/")[-2]
 
         articles.append({
             "url":         href,
-            "title":       _clean(h5.get_text(" ", strip=True)),
+            "title":       title,
             "summary":     summary,
             "image_url":   img_url,
             "pub_date":    _pub_date_from_image(raw_src),
